@@ -1,0 +1,70 @@
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(gganimate)
+library(leaflet)
+library(leaflet.extras2)
+library(shiny)
+library(readr)
+library(RColorBrewer)
+library(scico)
+
+#  Ensure CRS consistency once at the start
+counties <- st_transform(counties, st_crs(trade_districts))
+
+#  Assign each county to its nearest trade district
+counties$nearest_trade_district <- st_nearest_feature(counties, trade_districts)
+counties <- counties %>%
+  mutate(trade_district = trade_districts$District[nearest_trade_district])
+
+#  Expand counties across all time frames
+unique_time_values <- unique(trade_districts$Time)
+counties_expanded <- counties %>%
+  slice(rep(1:n(), each = length(unique_time_values))) %>%
+  mutate(Time = rep(unique_time_values, times = nrow(counties)))
+
+#  Spatial join to attach `bot_local` from the nearest trade district
+counties_expanded <- st_join(counties_expanded, trade_districts %>% select(District, Time, bot_local),
+                             join = st_nearest_feature)
+
+#  Ensure `bot_local` exists and has no `NA` values
+counties_expanded$bot_local[is.na(counties_expanded$bot_local)] <- 0
+
+#  Clean geometries to prevent topology errors
+counties_expanded <- st_make_valid(counties_expanded) %>%
+  distinct(geometry, .keep_all = TRUE) %>%
+  st_simplify(dTolerance = 10)
+
+#  Dissolve counties into trade districts per time frame
+trade_districts_poly <- counties_expanded %>%
+  group_by(trade_district, Time) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  st_as_sf()
+
+#  Spatial join to attach `bot_local` to `trade_districts_poly`
+trade_districts_poly <- st_join(trade_districts_poly, trade_districts %>% select(District, Time, bot_local),
+                                join = st_nearest_feature)
+
+#  Final geometry cleanup
+trade_districts_poly <- st_make_valid(trade_districts_poly) %>%
+  distinct(geometry, .keep_all = TRUE) %>%
+  st_transform(3857) %>%
+  st_simplify(dTolerance = 10)
+
+#  Standardize column names
+trade_districts_poly <- trade_districts_poly %>%
+  rename(trade_district = District)
+
+# Animated Trade District Choropleth Map
+p <- ggplot() +
+  geom_sf(data = trade_districts_poly, aes(fill = bot_local, group = trade_district), color = "black") +
+  scale_fill_fermenter(palette = "RdBu", breaks = c(-500000000, -100000000, 0, 100000000, 500000000)) +
+  theme_void() +
+  labs(title = "Trade Balance by Trade District Over Time",
+       subtitle = "Year: {closest_state}",
+       fill = "Trade Balance ($)") +
+  transition_states(Time, transition_length = 2, state_length = 1) +
+  ease_aes('linear')
+
+#  Save animation
+anim_save("trade_district_balance_animation.gif", animate(p, fps = 5, duration = 10, width = 800, height = 600))
